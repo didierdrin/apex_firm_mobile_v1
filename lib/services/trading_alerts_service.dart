@@ -7,7 +7,7 @@ import '../models/signal_model.dart';
 
 const _alertsApiUrl = String.fromEnvironment(
   'ALERTS_API_URL',
-  defaultValue: 'https://fib-trading-bot.onrender.com',
+  defaultValue: 'https://apex-firm.vercel.app',
 );
 
 const _symbolLabels = {
@@ -68,14 +68,18 @@ class TradingAlertsService {
 
   Future<List<Signal>> _fetchSignals(int limit) async {
     final uri = Uri.parse('$_apiBaseUrl/api/alerts?limit=$limit');
-    final res = await _client.get(uri).timeout(const Duration(seconds: 20));
-    if (res.statusCode != 200) {
-      throw Exception('Alerts API ${res.statusCode}');
+    try {
+      final res = await _client.get(uri).timeout(const Duration(seconds: 20));
+      if (res.statusCode != 200) {
+        return [];
+      }
+      final decoded = jsonDecode(res.body);
+      if (decoded is! List) return [];
+      return decoded.map((row) => _mapRow(Map<String, dynamic>.from(row as Map))).toList()
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    } catch (_) {
+      return [];
     }
-    final decoded = jsonDecode(res.body);
-    if (decoded is! List) return [];
-    return decoded.map((row) => _mapRow(Map<String, dynamic>.from(row as Map))).toList()
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
   }
 
   Signal _mapRow(Map<String, dynamic> data) {
