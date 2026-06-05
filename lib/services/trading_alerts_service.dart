@@ -1,5 +1,14 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
+
 import '../models/signal_model.dart';
+
+const _alertsApiUrl = String.fromEnvironment(
+  'ALERTS_API_URL',
+  defaultValue: 'https://fib-trading-bot.onrender.com',
+);
 
 const _symbolLabels = {
   'EURUSD=X': 'EUR/USD', 'GBPJPY=X': 'GBP/JPY', 'AUDJPY=X': 'AUD/JPY',
@@ -44,49 +53,44 @@ const _symbolLabels = {
 };
 
 class TradingAlertsService {
-  TradingAlertsService({FirebaseFirestore? firestore})
-      : _db = firestore ?? FirebaseFirestore.instance;
+  TradingAlertsService({http.Client? client, String? apiBaseUrl})
+      : _client = client ?? http.Client(),
+        _apiBaseUrl = (apiBaseUrl ?? _alertsApiUrl).replaceAll(RegExp(r'/$'), '');
 
-  final FirebaseFirestore _db;
+  final http.Client _client;
+  final String _apiBaseUrl;
 
-  /// Live feed from the same `trading_alerts` collection the bot writes to.
-  Stream<List<Signal>> watchSignals({int limit = 50}) {
-    Query<Map<String, dynamic>> query;
-    try {
-      query = _db
-          .collection('trading_alerts')
-          .orderBy('timestamp_ms', descending: true)
-          .limit(limit);
-    } catch (_) {
-      query = _db.collection('trading_alerts').limit(limit);
-    }
-
-    return query.snapshots().map((snap) {
-      final signals = snap.docs.map(_mapDoc).toList();
-      signals.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-      return signals.take(limit).toList();
-    });
+  Stream<List<Signal>> watchSignals({int limit = 50}) async* {
+    yield await _fetchSignals(limit);
+    yield* Stream.periodic(const Duration(seconds: 15), (_) => limit)
+        .asyncMap(_fetchSignals);
   }
 
-  Signal _mapDoc(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
-    final data = doc.data();
+  Future<List<Signal>> _fetchSignals(int limit) async {
+    final uri = Uri.parse('$_apiBaseUrl/api/alerts?limit=$limit');
+    final res = await _client.get(uri).timeout(const Duration(seconds: 20));
+    if (res.statusCode != 200) {
+      throw Exception('Alerts API ${res.statusCode}');
+    }
+    final decoded = jsonDecode(res.body);
+    if (decoded is! List) return [];
+    return decoded.map((row) => _mapRow(Map<String, dynamic>.from(row as Map))).toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+  }
+
+  Signal _mapRow(Map<String, dynamic> data) {
     final symbol = data['symbol'] as String? ?? 'UNKNOWN';
     final typeRaw = (data['type'] as String? ?? 'BUY').toUpperCase();
     final price = (data['price'] as num?)?.toDouble() ?? 0.0;
     final createdAt = _parseTimestamp(data);
-
     final signalType = _mapSignalType(typeRaw);
-    final status = typeRaw.startsWith('EXIT')
-        ? SignalStatus.closed
-        : SignalStatus.active;
-
     final offset = price * 0.005;
 
     return Signal(
-      id: doc.id,
+      id: (data['id'] ?? data['timestamp_ms'] ?? symbol).toString(),
       pair: _symbolLabels[symbol] ?? symbol,
       type: signalType,
-      status: status,
+      status: typeRaw.startsWith('EXIT') ? SignalStatus.closed : SignalStatus.active,
       assetClass: _assetClassFor(symbol),
       entryPrice: price,
       stopLoss: signalType == SignalType.buy ? price - offset : price + offset,
@@ -96,7 +100,7 @@ class TradingAlertsService {
       currentPrice: price,
       analysis: _buildAnalysis(data),
       createdAt: createdAt,
-      timeframe: data['timeframe'] as String? ?? '1h',
+      timeframe: data['timeframe'] as String? ?? '1m',
       riskRewardRatio: 3,
       isPremium: data['confidence'] == 'HIGH',
     );
@@ -107,50 +111,24 @@ class TradingAlertsService {
     if (ms is num) {
       return DateTime.fromMillisecondsSinceEpoch(ms.toInt(), isUtc: true).toLocal();
     }
-
-    final ts = data['timestamp'];
-    if (ts is Timestamp) {
-      return ts.toDate();
-    }
-    if (ts is String) {
-      return DateTime.tryParse(ts) ?? DateTime.now();
-    }
-    if (ts is num) {
-      final epoch = ts < 1e12 ? ts * 1000 : ts;
-      return DateTime.fromMillisecondsSinceEpoch(epoch.toInt(), isUtc: true).toLocal();
-    }
-
-    final iso = data['timestamp_iso'] as String?;
+    final iso = data['timestamp_iso'] as String? ?? data['bar_time'] as String?;
     if (iso != null) {
       return DateTime.tryParse(iso) ?? DateTime.now();
     }
-
     return DateTime.now();
   }
 
   SignalType _mapSignalType(String typeRaw) {
-    if (typeRaw == 'SELL' || typeRaw == 'EXIT_LONG') {
-      return SignalType.sell;
-    }
+    if (typeRaw == 'SELL' || typeRaw == 'EXIT_LONG') return SignalType.sell;
     return SignalType.buy;
   }
 
   AssetClass _assetClassFor(String symbol) {
-    if (symbol.startsWith('^')) {
-      return AssetClass.indices;
-    }
-    if (symbol.endsWith('=F')) {
-      return AssetClass.commodities;
-    }
-    if (symbol.endsWith('-USD')) {
-      return AssetClass.crypto;
-    }
-    if (symbol.contains('XAU') || symbol.contains('XAG')) {
-      return AssetClass.commodities;
-    }
-    if (symbol.endsWith('=X')) {
-      return AssetClass.forex;
-    }
+    if (symbol.startsWith('^')) return AssetClass.indices;
+    if (symbol.endsWith('=F')) return AssetClass.commodities;
+    if (symbol.endsWith('-USD')) return AssetClass.crypto;
+    if (symbol.contains('XAU') || symbol.contains('XAG')) return AssetClass.commodities;
+    if (symbol.endsWith('=X')) return AssetClass.forex;
     return AssetClass.stocks;
   }
 
