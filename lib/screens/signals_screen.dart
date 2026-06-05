@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/signal_model.dart';
-import '../data/mock_signals.dart';
+import '../services/trading_alerts_service.dart';
 import '../widgets/stats_header.dart';
 import '../widgets/signal_tile.dart';
 import 'signal_detail_screen.dart';
@@ -13,14 +13,16 @@ class SignalsScreen extends StatefulWidget {
 }
 
 class _SignalsScreenState extends State<SignalsScreen> {
+  final TradingAlertsService _alertsService = TradingAlertsService();
   String _statusFilter = 'All';
   AssetClass? _assetFilter;
 
-  List<Signal> get _filteredSignals {
-    return mockSignals.where((signal) {
-      final statusMatch = _statusFilter == 'All' || 
+  List<Signal> _filterSignals(List<Signal> signals) {
+    return signals.where((signal) {
+      final statusMatch = _statusFilter == 'All' ||
           signal.statusLabel.toLowerCase() == _statusFilter.toLowerCase();
-      final assetMatch = _assetFilter == null || signal.assetClass == _assetFilter;
+      final assetMatch =
+          _assetFilter == null || signal.assetClass == _assetFilter;
       return statusMatch && assetMatch;
     }).toList();
   }
@@ -40,7 +42,34 @@ class _SignalsScreenState extends State<SignalsScreen> {
             ),
             const SizedBox(height: 16),
             Expanded(
-              child: _buildSignalsList(),
+              child: StreamBuilder<List<Signal>>(
+                stream: _alertsService.watchSignals(),
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const Center(
+                      child: CircularProgressIndicator(
+                        color: Color(0xFFD4AF37),
+                      ),
+                    );
+                  }
+
+                  if (snapshot.hasError) {
+                    return Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Text(
+                          'Could not load live signals.\n${snapshot.error}',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: Color(0xFF8A94A6)),
+                        ),
+                      ),
+                    );
+                  }
+
+                  final signals = _filterSignals(snapshot.data ?? []);
+                  return _buildSignalsList(signals);
+                },
+              ),
             ),
           ],
         ),
@@ -92,19 +121,23 @@ class _SignalsScreenState extends State<SignalsScreen> {
     );
   }
 
-  Widget _buildSignalsList() {
-    final signals = _filteredSignals;
-    
+  Widget _buildSignalsList(List<Signal> signals) {
     if (signals.isEmpty) {
       return const Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.search_off_rounded, color: Color(0xFF8A94A6), size: 48),
+            Icon(Icons.radar_rounded, color: Color(0xFF8A94A6), size: 48),
             SizedBox(height: 16),
             Text(
-              'No signals found',
+              'No live signals yet',
               style: TextStyle(color: Color(0xFF8A94A6), fontSize: 16),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Bot is monitoring markets — new alerts appear here automatically.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Color(0xFF5A6478), fontSize: 13),
             ),
           ],
         ),
